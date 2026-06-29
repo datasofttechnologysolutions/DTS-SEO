@@ -1,163 +1,178 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Claude SEO Installer
+# DataForSEO Extension Installer for Claude SEO
 # Wraps everything in main() to prevent partial execution on network failure
 
 main() {
-    SKILL_DIR="${HOME}/.claude/skills/seo"
+    SKILL_DIR="${HOME}/.claude/skills/seo-dataforseo"
     AGENT_DIR="${HOME}/.claude/agents"
-    REPO_URL="https://github.com/AgriciDaniel/claude-seo"
-    # Pin to a specific release tag to prevent silent updates from main.
-    # This default MUST be bumped on every release. CI guard
-    # (tests/test_manifest_consistency.py) enforces this matches plugin.json.
-    # Override: CLAUDE_SEO_TAG=main bash install.sh
-    REPO_TAG="${CLAUDE_SEO_TAG:-v2.2.0}"
+    SEO_SKILL_DIR="${HOME}/.claude/skills/seo"
+    SETTINGS_FILE="${HOME}/.claude/settings.json"
 
     echo "════════════════════════════════════════"
-    echo "║   Claude SEO - Installer             ║"
-    echo "║   Claude Code SEO Skill              ║"
+    echo "║   DataForSEO Extension - Installer   ║"
+    echo "║   For Claude SEO                     ║"
     echo "════════════════════════════════════════"
     echo ""
+
+    # Support both traditional (curl|bash → ~/.claude/skills/seo) and marketplace
+    # (plugin install → ~/.claude/plugins/cache/.../skills/seo) installations.
+    # Resolve early using BASH_SOURCE so it works even when run from the plugin cache.
+    _EARLY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _PLUGIN_SEO_DIR="$(cd "${_EARLY_SCRIPT_DIR}/../.." 2>/dev/null && pwd)/skills/seo"
+    if [ ! -d "${SEO_SKILL_DIR}" ] && [ -d "${_PLUGIN_SEO_DIR}" ]; then
+        SEO_SKILL_DIR="${_PLUGIN_SEO_DIR}"
+    fi
+    if [ ! -d "${SEO_SKILL_DIR}" ]; then
+        _GLOB_MATCH=$(ls -d "${HOME}/.claude/plugins/cache/*/claude-seo/"*/skills/seo 2>/dev/null | tail -n1 || true)
+        [ -n "${_GLOB_MATCH}" ] && [ -d "${_GLOB_MATCH}" ] && SEO_SKILL_DIR="${_GLOB_MATCH}"
+    fi
 
     # Check prerequisites
-    command -v python3 >/dev/null 2>&1 || { echo "✗ Python 3 is required but not installed."; exit 1; }
-    command -v git >/dev/null 2>&1 || { echo "✗ Git is required but not installed."; exit 1; }
-
-    # Check Python version (3.10+ required)
-    PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    PYTHON_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 10) else 0)')
-    if [ "${PYTHON_OK}" = "0" ]; then
-        echo "✗ Python 3.10+ is required but ${PYTHON_VERSION} was found."
+    if [ ! -d "${SEO_SKILL_DIR}" ]; then
+        echo "✗ Claude SEO is not installed."
+        echo "  Install it first: curl -fsSL https://raw.githubusercontent.com/AgriciDaniel/claude-seo/main/install.sh | bash"
         exit 1
     fi
-    echo "✓ Python ${PYTHON_VERSION} detected"
+    echo "✓ Claude SEO detected"
 
-    # Create directories
+    if ! command -v node >/dev/null 2>&1; then
+        echo "✗ Node.js is required but not installed."
+        echo "  Install Node.js 20+: https://nodejs.org/"
+        exit 1
+    fi
+
+    NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
+    if [ "${NODE_VERSION}" -lt 20 ]; then
+        echo "✗ Node.js 20+ required (found v${NODE_VERSION})."
+        echo "  Update: https://nodejs.org/"
+        exit 1
+    fi
+    echo "✓ Node.js v$(node -v | sed 's/v//') detected"
+
+    if ! command -v npx >/dev/null 2>&1; then
+        echo "✗ npx is required but not found (comes with npm)."
+        exit 1
+    fi
+    echo "✓ npx detected"
+
+    # Prompt for credentials
+    echo ""
+    echo "DataForSEO API credentials required."
+    echo "Sign up at: https://app.dataforseo.com/register"
+    echo ""
+
+    read -rp "DataForSEO username (email): " DFSE_USERNAME
+    if [ -z "${DFSE_USERNAME}" ]; then
+        echo "✗ Username cannot be empty."
+        exit 1
+    fi
+
+    read -rsp "DataForSEO password: " DFSE_PASSWORD
+    echo ""
+    if [ -z "${DFSE_PASSWORD}" ]; then
+        echo "✗ Password cannot be empty."
+        exit 1
+    fi
+
+    # Determine script directory (works for both ./install.sh and curl|bash)
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # Check if running from repo or standalone
+    if [ -f "${SCRIPT_DIR}/skills/seo-dataforseo/SKILL.md" ]; then
+        SOURCE_DIR="${SCRIPT_DIR}"
+    elif [ -f "${SCRIPT_DIR}/extensions/dataforseo/skills/seo-dataforseo/SKILL.md" ]; then
+        SOURCE_DIR="${SCRIPT_DIR}/extensions/dataforseo"
+    else
+        echo "✗ Cannot find extension source files."
+        echo "  Run this script from the claude-seo repo: ./extensions/dataforseo/install.sh"
+        exit 1
+    fi
+
+    # Install skill
+    echo ""
+    echo "→ Installing DataForSEO skill..."
     mkdir -p "${SKILL_DIR}"
+    cp "${SOURCE_DIR}/skills/seo-dataforseo/SKILL.md" "${SKILL_DIR}/SKILL.md"
+
+    # Install agent
+    echo "→ Installing DataForSEO agent..."
     mkdir -p "${AGENT_DIR}"
+    cp "${SOURCE_DIR}/agents/seo-dataforseo.md" "${AGENT_DIR}/seo-dataforseo.md"
 
-    # Clone or update
-    TEMP_DIR=$(mktemp -d)
-    trap "rm -rf ${TEMP_DIR}" EXIT
+    # Install field config
+    echo "→ Installing field config..."
+    cp "${SOURCE_DIR}/field-config.json" "${SEO_SKILL_DIR}/dataforseo-field-config.json"
 
-    echo "↓ Downloading Claude SEO (${REPO_TAG})..."
-    git clone --depth 1 --branch "${REPO_TAG}" "${REPO_URL}" "${TEMP_DIR}/claude-seo" 2>/dev/null
+    # Merge MCP config into settings.json
+    echo "→ Configuring MCP server..."
+    FIELD_CONFIG_PATH="${SEO_SKILL_DIR}/dataforseo-field-config.json"
 
-    # Copy skill files
-    echo "→ Installing skill files..."
-    cp -r "${TEMP_DIR}/claude-seo/skills/seo/"* "${SKILL_DIR}/"
+    # Credentials are passed as argv (never interpolated into the source string)
+    # and the settings file is written atomically with 0600 permissions.
+    python3 - "${SETTINGS_FILE}" "${DFSE_USERNAME}" "${DFSE_PASSWORD}" "${FIELD_CONFIG_PATH}" <<'PY'
+import json, os, sys, tempfile
 
-    # Copy sub-skills
-    if [ -d "${TEMP_DIR}/claude-seo/skills" ]; then
-        for skill_dir in "${TEMP_DIR}/claude-seo/skills"/*/; do
-            skill_name=$(basename "${skill_dir}")
-            target="${HOME}/.claude/skills/${skill_name}"
-            mkdir -p "${target}"
-            cp -r "${skill_dir}"* "${target}/"
-        done
+settings_path, username, password, field_config = sys.argv[1:5]
+
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except json.JSONDecodeError:
+        settings = {}
+else:
+    settings = {}
+
+settings.setdefault('mcpServers', {})['dataforseo'] = {
+    'command': 'npx',
+    'args': ['-y', 'dataforseo-mcp-server@2.8.10'],
+    'env': {
+        'DATAFORSEO_USERNAME': username,
+        'DATAFORSEO_PASSWORD': password,
+        'ENABLED_MODULES': 'SERP,KEYWORDS_DATA,ONPAGE,DATAFORSEO_LABS,BACKLINKS,DOMAIN_ANALYTICS,BUSINESS_DATA,CONTENT_ANALYSIS,AI_OPTIMIZATION',
+        'FIELD_CONFIG_PATH': field_config,
+    },
+}
+
+os.makedirs(os.path.dirname(settings_path) or '.', exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(settings_path) or '.', prefix='.settings.', suffix='.json')
+try:
+    with os.fdopen(fd, 'w') as f:
+        json.dump(settings, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, settings_path)
+except Exception:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    raise
+
+print('  ✓ MCP server configured in settings.json')
+PY
+    if [ $? -ne 0 ]; then
+        echo "  ⚠  Could not auto-configure MCP server."
+        echo "  Add the dataforseo server manually to ~/.claude/settings.json"
+        echo "  See: extensions/dataforseo/docs/DATAFORSEO-SETUP.md"
     fi
 
-    # Copy schema templates
-    if [ -d "${TEMP_DIR}/claude-seo/schema" ]; then
-        mkdir -p "${SKILL_DIR}/schema"
-        cp -r "${TEMP_DIR}/claude-seo/schema/"* "${SKILL_DIR}/schema/"
-    fi
-
-    # Copy reference docs
-    if [ -d "${TEMP_DIR}/claude-seo/pdf" ]; then
-        mkdir -p "${SKILL_DIR}/pdf"
-        cp -r "${TEMP_DIR}/claude-seo/pdf/"* "${SKILL_DIR}/pdf/"
-    fi
-
-    # Copy agents
-    echo "→ Installing subagents..."
-    cp -r "${TEMP_DIR}/claude-seo/agents/"*.md "${AGENT_DIR}/" 2>/dev/null || true
-
-    # Copy shared scripts
-    if [ -d "${TEMP_DIR}/claude-seo/scripts" ]; then
-        mkdir -p "${SKILL_DIR}/scripts"
-        cp -r "${TEMP_DIR}/claude-seo/scripts/"* "${SKILL_DIR}/scripts/"
-    fi
-
-    # Copy hooks
-    if [ -d "${TEMP_DIR}/claude-seo/hooks" ]; then
-        mkdir -p "${SKILL_DIR}/hooks"
-        cp -r "${TEMP_DIR}/claude-seo/hooks/"* "${SKILL_DIR}/hooks/"
-        chmod +x "${SKILL_DIR}/hooks/"*.sh 2>/dev/null || true
-        chmod +x "${SKILL_DIR}/hooks/"*.py 2>/dev/null || true
-        # Manual installs copy hook files only; enforcement loads through the plugin manifest.
-        echo "  Note: hook enforcement requires plugin install (/plugin install ${REPO_URL}); manual hook copy is best-effort."
-    fi
-
-    # Copy extensions (optional add-ons: dataforseo, banana)
-    if [ -d "${TEMP_DIR}/claude-seo/extensions" ]; then
-        echo "=> Installing extensions..."
-        for ext_dir in "${TEMP_DIR}/claude-seo/extensions"/*/; do
-            [ -d "${ext_dir}" ] || continue
-            ext_name=$(basename "${ext_dir}")
-            # Extension skills
-            if [ -d "${ext_dir}skills" ]; then
-                for ext_skill in "${ext_dir}skills"/*/; do
-                    [ -d "${ext_skill}" ] || continue
-                    ext_skill_name=$(basename "${ext_skill}")
-                    target="${HOME}/.claude/skills/${ext_skill_name}"
-                    mkdir -p "${target}"
-                    cp -r "${ext_skill}"* "${target}/"
-                done
-            fi
-            # Extension agents
-            if [ -d "${ext_dir}agents" ]; then
-                cp -r "${ext_dir}agents/"*.md "${AGENT_DIR}/" 2>/dev/null || true
-            fi
-            # Extension references
-            if [ -d "${ext_dir}references" ]; then
-                mkdir -p "${SKILL_DIR}/extensions/${ext_name}/references"
-                cp -r "${ext_dir}references/"* "${SKILL_DIR}/extensions/${ext_name}/references/"
-            fi
-            # Extension scripts
-            if [ -d "${ext_dir}scripts" ]; then
-                mkdir -p "${SKILL_DIR}/extensions/${ext_name}/scripts"
-                cp -r "${ext_dir}scripts/"* "${SKILL_DIR}/extensions/${ext_name}/scripts/"
-            fi
-        done
-    fi
-
-    # Copy requirements.txt to skill dir so users can retry later
-    cp "${TEMP_DIR}/claude-seo/requirements.txt" "${SKILL_DIR}/requirements.txt" 2>/dev/null || true
-
-    # Install Python dependencies (venv preferred, --user fallback)
-    echo "→ Installing Python dependencies..."
-    VENV_DIR="${SKILL_DIR}/.venv"
-    if python3 -m venv "${VENV_DIR}" 2>/dev/null; then
-        "${VENV_DIR}/bin/pip" install --quiet -r "${TEMP_DIR}/claude-seo/requirements.txt" 2>/dev/null && \
-            echo "  ✓ Installed in venv at ${VENV_DIR}" || \
-            echo "  ⚠  Venv pip install failed. Run: ${VENV_DIR}/bin/pip install -r ${SKILL_DIR}/requirements.txt"
-    else
-        pip install --quiet --user -r "${TEMP_DIR}/claude-seo/requirements.txt" 2>/dev/null || \
-        echo "  ⚠  Could not auto-install. Run: pip install --user -r ${SKILL_DIR}/requirements.txt"
-    fi
-
-    # Optional: Install Playwright browsers (for screenshot analysis)
-    echo "→ Installing Playwright browsers (optional, for visual analysis)..."
-    if [ -f "${VENV_DIR}/bin/playwright" ]; then
-        "${VENV_DIR}/bin/python" -m playwright install chromium 2>/dev/null || \
-        echo "  ⚠  Playwright install failed. Visual analysis will use WebFetch fallback."
-    else
-        python3 -m playwright install chromium 2>/dev/null || \
-        echo "  ⚠  Playwright install failed. Visual analysis will use WebFetch fallback."
-    fi
+    # Pre-warm npm package without starting the MCP server binary.
+    echo "→ Pre-downloading dataforseo-mcp-server..."
+    npx --yes --package=dataforseo-mcp-server@2.8.10 -- node -e "" >/dev/null 2>&1 || true
 
     echo ""
-    echo "✓ Claude SEO installed successfully!"
+    echo "✓ DataForSEO extension installed successfully!"
     echo ""
     echo "Usage:"
     echo "  1. Start Claude Code:  claude"
-    echo "  2. Run commands:       /seo audit https://example.com"
+    echo "  2. Run commands:"
+    echo "     /seo dataforseo serp best coffee shops"
+    echo "     /seo dataforseo keywords seo tools"
+    echo "     /seo dataforseo backlinks example.com"
+    echo "     /seo dataforseo ai-mentions your brand"
     echo ""
-    echo "Python deps location: ${SKILL_DIR}/requirements.txt"
-    echo "Inspect remote scripts before piping them to bash."
-    echo "To uninstall: curl -fsSL ${REPO_URL}/raw/main/uninstall.sh | bash"
+    echo "All 22 commands: see extensions/dataforseo/README.md"
+    echo "To uninstall: ./extensions/dataforseo/uninstall.sh"
 }
 
 main "$@"

@@ -1,291 +1,174 @@
-# Claude SEO Installer for Windows
+# DataForSEO Extension Installer for Claude SEO (Windows)
 # PowerShell installation script
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "|   Claude SEO - Installer             |" -ForegroundColor Cyan
-Write-Host "|   Claude Code SEO Skill              |" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "║   DataForSEO Extension - Installer   ║" -ForegroundColor Cyan
+Write-Host "║   For Claude SEO                     ║" -ForegroundColor Cyan
+Write-Host "════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
 
-function Resolve-Python {
-    $candidates = @(
-        @{ Exe = 'py'; Args = @('-3') },
-        @{ Exe = 'python3'; Args = @() },
-        @{ Exe = 'python'; Args = @() }
-    )
-
-    foreach ($candidate in $candidates) {
-        $resolved = Test-PythonCandidate -Exe $candidate.Exe -Args $candidate.Args
-        if ($null -ne $resolved) {
-            return $resolved
-        }
-    }
-
-    return $null
-}
-
-function Invoke-External {
-    param(
-        [Parameter(Mandatory = $true)][string]$Exe,
-        [Parameter(Mandatory = $true)][string[]]$Args,
-        [switch]$Quiet
-    )
-
-    $previousErrorActionPreference = $ErrorActionPreference
-    $hasNativePreference = $null -ne (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue)
-    if ($hasNativePreference) {
-        $previousNativePreference = $PSNativeCommandUseErrorActionPreference
-    }
-
-    try {
-        $ErrorActionPreference = 'Continue'
-        if ($hasNativePreference) {
-            $PSNativeCommandUseErrorActionPreference = $false
-        }
-
-        $output = & $Exe @Args 2>&1 | ForEach-Object { $_.ToString() }
-        $exitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-        if ($hasNativePreference) {
-            $PSNativeCommandUseErrorActionPreference = $previousNativePreference
-        }
-    }
-
-    if (-not $Quiet -and $null -ne $output -and $output.Count -gt 0) {
-        $output | ForEach-Object { Write-Host $_ }
-    }
-
-    return @{ ExitCode = $exitCode; Output = $output }
-}
-
-function Test-PythonCandidate {
-    param(
-        [Parameter(Mandatory = $true)][string]$Exe,
-        [Parameter(Mandatory = $true)][string[]]$Args
-    )
-
-    $pythonCmd = Get-Command -Name $Exe -ErrorAction SilentlyContinue
-    if ($null -eq $pythonCmd) {
-        return $null
-    }
-
-    $probeCode = 'import sys; print(sys.executable); print(sys.version.split()[0])'
-    $probe = Invoke-External -Exe $Exe -Args @($Args + @('-c', $probeCode)) -Quiet
-    $probeText = ($probe.Output -join "`n")
-
-    if ($probe.ExitCode -ne 0) {
-        return $null
-    }
-
-    if ($probeText -match 'Microsoft Store|WindowsApps|App execution alias|was not found') {
-        return $null
-    }
-
-    return @{ Exe = $Exe; Args = $Args }
-}
-
 # Check prerequisites
-$python = Resolve-Python
-if ($null -eq $python) {
-    Write-Host "[x] Python is required but was not found (tried 'py -3', 'python3', and 'python')." -ForegroundColor Red
+$SeoSkillDir = "$env:USERPROFILE\.claude\skills\seo"
+if (-not (Test-Path $SeoSkillDir)) {
+    Write-Host "✗ Claude SEO is not installed." -ForegroundColor Red
+    Write-Host "  Install it first: irm https://raw.githubusercontent.com/AgriciDaniel/claude-seo/main/install.ps1 | iex"
+    exit 1
+}
+Write-Host "✓ Claude SEO detected" -ForegroundColor Green
+
+$nodeCmd = Get-Command -Name node -ErrorAction SilentlyContinue
+if ($null -eq $nodeCmd) {
+    Write-Host "✗ Node.js is required but not installed." -ForegroundColor Red
+    Write-Host "  Install Node.js 20+: https://nodejs.org/"
     exit 1
 }
 
-try {
-    $pythonVersion = & $python.Exe @($python.Args + @('--version')) 2>&1
-    Write-Host "[+] $pythonVersion detected" -ForegroundColor Green
-} catch {
-    Write-Host "[x] Python is installed but could not be executed." -ForegroundColor Red
+$nodeVersion = (node -v) -replace 'v','' -split '\.' | Select-Object -First 1
+if ([int]$nodeVersion -lt 20) {
+    Write-Host "✗ Node.js 20+ required (found v$nodeVersion)." -ForegroundColor Red
+    exit 1
+}
+Write-Host "✓ Node.js $(node -v) detected" -ForegroundColor Green
+
+$npxCmd = Get-Command -Name npx -ErrorAction SilentlyContinue
+if ($null -eq $npxCmd) {
+    Write-Host "✗ npx is required but not found (comes with npm)." -ForegroundColor Red
+    exit 1
+}
+Write-Host "✓ npx detected" -ForegroundColor Green
+
+# Prompt for credentials
+Write-Host ""
+Write-Host "DataForSEO API credentials required." -ForegroundColor Yellow
+Write-Host "Sign up at: https://app.dataforseo.com/register"
+Write-Host ""
+
+$DfseUsername = Read-Host "DataForSEO username (email)"
+if ([string]::IsNullOrEmpty($DfseUsername)) {
+    Write-Host "✗ Username cannot be empty." -ForegroundColor Red
     exit 1
 }
 
-try {
-    git --version | Out-Null
-    Write-Host "[+] Git detected" -ForegroundColor Green
-} catch {
-    Write-Host "[x] Git is required but not installed." -ForegroundColor Red
+$DfsePasswordSecure = Read-Host "DataForSEO password" -AsSecureString
+$DfsePassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
+    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($DfsePasswordSecure)
+)
+if ([string]::IsNullOrEmpty($DfsePassword)) {
+    Write-Host "✗ Password cannot be empty." -ForegroundColor Red
+    exit 1
+}
+
+# Determine source directory
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (Test-Path "$ScriptDir\skills\seo-dataforseo\SKILL.md") {
+    $SourceDir = $ScriptDir
+} elseif (Test-Path "$ScriptDir\extensions\dataforseo\skills\seo-dataforseo\SKILL.md") {
+    $SourceDir = "$ScriptDir\extensions\dataforseo"
+} else {
+    Write-Host "✗ Cannot find extension source files." -ForegroundColor Red
+    Write-Host "  Run this script from the claude-seo repo."
     exit 1
 }
 
 # Set paths
-$SkillDir = "$env:USERPROFILE\.claude\skills\seo"
+$SkillDir = "$env:USERPROFILE\.claude\skills\seo-dataforseo"
 $AgentDir = "$env:USERPROFILE\.claude\agents"
-$RepoUrl = "https://github.com/AgriciDaniel/claude-seo"
-# Pin to a specific release tag to prevent silent updates from main.
-# This default MUST be bumped on every release. CI guard
-# (tests/test_manifest_consistency.py) enforces this matches plugin.json.
-# Override: $env:CLAUDE_SEO_TAG = 'main'; .\install.ps1
-$RepoTag = if ($env:CLAUDE_SEO_TAG) { $env:CLAUDE_SEO_TAG } else { 'v2.2.0' }
+$SettingsFile = "$env:USERPROFILE\.claude\settings.json"
+$FieldConfigPath = "$SeoSkillDir\dataforseo-field-config.json"
 
-# Create directories
+# Install skill
+Write-Host ""
+Write-Host "→ Installing DataForSEO skill..." -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $SkillDir | Out-Null
-New-Item -ItemType Directory -Force -Path $AgentDir | Out-Null
+Copy-Item -Force "$SourceDir\skills\seo-dataforseo\SKILL.md" "$SkillDir\SKILL.md"
 
-# Clone to temp directory
-$TempDir = Join-Path $env:TEMP "claude-seo-install"
-if (Test-Path $TempDir) {
-    Remove-Item -Recurse -Force $TempDir
+# Install agent
+Write-Host "→ Installing DataForSEO agent..." -ForegroundColor Yellow
+New-Item -ItemType Directory -Force -Path $AgentDir | Out-Null
+Copy-Item -Force "$SourceDir\agents\seo-dataforseo.md" "$AgentDir\seo-dataforseo.md"
+
+# Install field config
+Write-Host "→ Installing field config..." -ForegroundColor Yellow
+Copy-Item -Force "$SourceDir\field-config.json" $FieldConfigPath
+
+# Merge MCP config into settings.json
+Write-Host "→ Configuring MCP server..." -ForegroundColor Yellow
+
+$python = Get-Command -Name python -ErrorAction SilentlyContinue
+if ($null -eq $python) {
+    $python = Get-Command -Name py -ErrorAction SilentlyContinue
 }
 
-$keepTemp = ($env:CLAUDE_SEO_KEEP_TEMP -eq '1')
+if ($null -ne $python) {
+    $pyExe = $python.Source
+    # Credentials are passed as argv (never interpolated into the source string)
+    # and the settings file is written atomically with 0600 permissions.
+    $pyScript = @"
+import json, os, sys, tempfile
+path, username, password, field_config = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+settings = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            settings = json.load(f)
+    except json.JSONDecodeError:
+        settings = {}
+settings.setdefault('mcpServers', {})['dataforseo'] = {
+    'command': 'npx',
+    'args': ['-y', 'dataforseo-mcp-server@2.8.10'],
+    'env': {
+        'DATAFORSEO_USERNAME': username,
+        'DATAFORSEO_PASSWORD': password,
+        'ENABLED_MODULES': 'SERP,KEYWORDS_DATA,ONPAGE,DATAFORSEO_LABS,BACKLINKS,DOMAIN_ANALYTICS,BUSINESS_DATA,CONTENT_ANALYSIS,AI_OPTIMIZATION',
+        'FIELD_CONFIG_PATH': field_config,
+    },
+}
+os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.settings.', suffix='.json')
+try:
+    with os.fdopen(fd, 'w') as f:
+        json.dump(settings, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+except Exception:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    raise
+print('  ok')
+"@
 
-try {
-    Write-Host ">> Downloading Claude SEO ($RepoTag)..." -ForegroundColor Yellow
-    $clone = Invoke-External -Exe 'git' -Args @('clone','--depth','1','--branch',$RepoTag,$RepoUrl,$TempDir) -Quiet
-    if ($clone.ExitCode -ne 0) {
-        throw "git clone failed. Output:`n$($clone.Output -join "`n")"
-    }
-
-    # Copy skill files
-    Write-Host "=> Installing skill files..." -ForegroundColor Yellow
-    $skillSource = Join-Path $TempDir 'skills\seo'
-    if (-not (Test-Path $skillSource)) {
-        throw "Could not find skill source folder in repo clone."
-    }
-    Copy-Item -Recurse -Force (Join-Path $skillSource '*') $SkillDir
-
-    # Copy sub-skills
-    $SkillsPath = "$TempDir\skills"
-    if (Test-Path $SkillsPath) {
-        Get-ChildItem -Directory $SkillsPath | ForEach-Object {
-            $target = "$env:USERPROFILE\.claude\skills\$($_.Name)"
-            New-Item -ItemType Directory -Force -Path $target | Out-Null
-            Copy-Item -Recurse -Force "$($_.FullName)\*" $target
-        }
-    }
-
-    # Copy schema templates
-    $SchemaPath = "$TempDir\schema"
-    if (Test-Path $SchemaPath) {
-        $SkillSchema = "$SkillDir\schema"
-        New-Item -ItemType Directory -Force -Path $SkillSchema | Out-Null
-        Copy-Item -Recurse -Force "$SchemaPath\*" $SkillSchema
-    }
-
-    # Copy reference docs
-    $PdfPath = "$TempDir\pdf"
-    if (Test-Path $PdfPath) {
-        $SkillPdf = "$SkillDir\pdf"
-        New-Item -ItemType Directory -Force -Path $SkillPdf | Out-Null
-        Copy-Item -Recurse -Force "$PdfPath\*" $SkillPdf
-    }
-
-    # Copy agents
-    Write-Host "=> Installing subagents..." -ForegroundColor Yellow
-    $AgentsPath = Join-Path $TempDir 'agents'
-    if (Test-Path $AgentsPath) {
-        Copy-Item -Force (Join-Path $AgentsPath '*.md') $AgentDir -ErrorAction SilentlyContinue
-    }
-
-    # Copy shared scripts
-    $ScriptsPath = "$TempDir\scripts"
-    if (Test-Path $ScriptsPath) {
-        $SkillScripts = "$SkillDir\scripts"
-        New-Item -ItemType Directory -Force -Path $SkillScripts | Out-Null
-        Copy-Item -Recurse -Force "$ScriptsPath\*" $SkillScripts
-    }
-
-    # Copy hooks
-    Write-Host "  Note: hook enforcement requires plugin install; manual hook copy is best-effort." -ForegroundColor Yellow
-    $HooksPath = "$TempDir\hooks"
-    if (Test-Path $HooksPath) {
-        $SkillHooks = "$SkillDir\hooks"
-        New-Item -ItemType Directory -Force -Path $SkillHooks | Out-Null
-        Copy-Item -Recurse -Force "$HooksPath\*" $SkillHooks
-    }
-
-    # Copy extensions (optional add-ons: dataforseo, banana)
-    $ExtensionsPath = Join-Path $TempDir 'extensions'
-    if (Test-Path $ExtensionsPath) {
-        Write-Host "=> Installing extensions..." -ForegroundColor Yellow
-        Get-ChildItem -Directory $ExtensionsPath | ForEach-Object {
-            $extName = $_.Name
-            $extDir = $_.FullName
-            # Extension skills
-            $extSkills = Join-Path $extDir 'skills'
-            if (Test-Path $extSkills) {
-                Get-ChildItem -Directory $extSkills | ForEach-Object {
-                    $target = "$env:USERPROFILE\.claude\skills\$($_.Name)"
-                    New-Item -ItemType Directory -Force -Path $target | Out-Null
-                    Copy-Item -Recurse -Force "$($_.FullName)\*" $target
-                }
-            }
-            # Extension agents
-            $extAgents = Join-Path $extDir 'agents'
-            if (Test-Path $extAgents) {
-                Copy-Item -Force (Join-Path $extAgents '*.md') $AgentDir -ErrorAction SilentlyContinue
-            }
-            # Extension references
-            $extRefs = Join-Path $extDir 'references'
-            if (Test-Path $extRefs) {
-                $refTarget = "$SkillDir\extensions\$extName\references"
-                New-Item -ItemType Directory -Force -Path $refTarget | Out-Null
-                Copy-Item -Recurse -Force "$extRefs\*" $refTarget
-            }
-            # Extension scripts
-            $extScripts = Join-Path $extDir 'scripts'
-            if (Test-Path $extScripts) {
-                $scriptTarget = "$SkillDir\extensions\$extName\scripts"
-                New-Item -ItemType Directory -Force -Path $scriptTarget | Out-Null
-                Copy-Item -Recurse -Force "$extScripts\*" $scriptTarget
-            }
-        }
-    }
-
-    # Copy requirements.txt to skill dir for retry
-    $reqFile = Join-Path $TempDir 'requirements.txt'
-    $installedReqFile = Join-Path $SkillDir 'requirements.txt'
-    if (Test-Path $reqFile) {
-        Copy-Item -Force $reqFile $installedReqFile
-    }
-
-    # Install Python dependencies
-    Write-Host "=> Installing Python dependencies..." -ForegroundColor Yellow
-    if (Test-Path $reqFile) {
-        try {
-            $pip = Invoke-External -Exe $python.Exe -Args @($python.Args + @('-m','pip','install','-q','-r',$reqFile)) -Quiet
-            if ($pip.ExitCode -ne 0) {
-                throw ($pip.Output -join "`n")
-            }
-        } catch {
-            Write-Host "  [!]  Could not auto-install Python packages." -ForegroundColor Yellow
-            Write-Host "  Try: $($python.Exe) $($python.Args -join ' ') -m pip install -r `"$installedReqFile`"" -ForegroundColor Yellow
-        }
+    $result = $pyScript | & $pyExe - $SettingsFile $DfseUsername $DfsePassword $FieldConfigPath 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✓ MCP server configured in settings.json" -ForegroundColor Green
     } else {
-        Write-Host "  [!]  No requirements.txt found; skipping Python dependency install." -ForegroundColor Yellow
+        Write-Host "  ⚠  Could not auto-configure MCP server." -ForegroundColor Yellow
+        Write-Host "  Add the dataforseo server manually to ~\.claude\settings.json"
     }
+} else {
+    Write-Host "  ⚠  Python not found. Configure MCP server manually." -ForegroundColor Yellow
+    Write-Host "  See: extensions\dataforseo\docs\DATAFORSEO-SETUP.md"
+}
 
-    # Optional: Install Playwright browsers
-    Write-Host "=> Installing Playwright browsers (optional, for visual analysis)..." -ForegroundColor Yellow
-    try {
-        $pw = Invoke-External -Exe $python.Exe -Args @($python.Args + @('-m','playwright','install','chromium')) -Quiet
-        if ($pw.ExitCode -ne 0) {
-            throw ($pw.Output -join "`n")
-        }
-    } catch {
-        Write-Host "  [!]  Playwright install failed. Visual analysis will use WebFetch fallback." -ForegroundColor Yellow
-    }
+# Pre-warm npx package
+Write-Host "→ Pre-downloading dataforseo-mcp-server..." -ForegroundColor Yellow
+try {
+    & npx -y dataforseo-mcp-server@2.8.10 --help 2>&1 | Out-Null
 } catch {
-    Write-Host ""
-    Write-Host "[x] Installation failed: $($_.Exception.Message)" -ForegroundColor Red
-    if ($keepTemp -and (Test-Path $TempDir)) {
-        Write-Host "Temp dir kept at: $TempDir" -ForegroundColor Yellow
-    }
-    throw
-} finally {
-    if (-not $keepTemp -and (Test-Path $TempDir)) {
-        Remove-Item -Recurse -Force $TempDir
-    }
+    # Ignore errors from pre-warm
 }
 
 Write-Host ""
-Write-Host "[+] Claude SEO installed successfully!" -ForegroundColor Green
+Write-Host "✓ DataForSEO extension installed successfully!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Usage:" -ForegroundColor Cyan
 Write-Host "  1. Start Claude Code:  claude"
-Write-Host "  2. Run commands:       /seo audit https://example.com"
+Write-Host "  2. Run commands:"
+Write-Host "     /seo dataforseo serp best coffee shops"
+Write-Host "     /seo dataforseo keywords seo tools"
+Write-Host "     /seo dataforseo backlinks example.com"
+Write-Host "     /seo dataforseo ai-mentions your brand"
 Write-Host ""
-Write-Host "Python deps location: $installedReqFile" -ForegroundColor Gray
+Write-Host "All 22 commands: see extensions\dataforseo\README.md"
+Write-Host "To uninstall: .\extensions\dataforseo\uninstall.ps1"

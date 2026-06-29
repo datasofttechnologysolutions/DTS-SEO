@@ -1,69 +1,58 @@
-#!/usr/bin/env pwsh
-# claude-seo manual-install uninstaller (Windows)
-#
-# Removes the orchestrator skill (~/.claude/skills/seo), all sub-skills
-# (~/.claude/skills/seo-*), and all sub-agents (~/.claude/agents/seo-*.md).
-#
-# Uses glob enumeration rather than a hardcoded list so future skill
-# additions are cleaned up automatically without releasing a new
-# uninstaller.
-#
-# Plugin-install users should use Claude Code's own command instead:
-#   /plugin uninstall claude-seo@agricidaniel-claude-seo
-#   /plugin marketplace remove AgriciDaniel/claude-seo
+# DataForSEO Extension Uninstaller for Claude SEO (Windows)
 
 $ErrorActionPreference = "Stop"
 
-function Write-Color($Color, $Text) {
-    Write-Host $Text -ForegroundColor $Color
+Write-Host "→ Uninstalling DataForSEO extension..." -ForegroundColor Yellow
+
+# Remove skill
+if (Test-Path "$env:USERPROFILE\.claude\skills\seo-dataforseo") {
+    Remove-Item -Recurse -Force "$env:USERPROFILE\.claude\skills\seo-dataforseo"
 }
 
-function Main {
-    $SkillDir = Join-Path $env:USERPROFILE ".claude" "skills"
-    $AgentDir = Join-Path $env:USERPROFILE ".claude" "agents"
-
-    Write-Color Cyan "=== Uninstalling claude-seo ==="
-    Write-Host ""
-
-    $removedSkills = 0
-    $removedAgents = 0
-
-    # Remove orchestrator if present
-    $orchestratorPath = Join-Path $SkillDir "seo"
-    if (Test-Path $orchestratorPath -PathType Container) {
-        Remove-Item -Recurse -Force $orchestratorPath
-        Write-Color Green "  Removed: $orchestratorPath"
-        $removedSkills++
-    }
-
-    # Remove every seo-* sub-skill directory
-    if (Test-Path $SkillDir -PathType Container) {
-        Get-ChildItem -Path $SkillDir -Directory -Filter "seo-*" -ErrorAction SilentlyContinue | ForEach-Object {
-            Remove-Item -Recurse -Force $_.FullName
-            Write-Color Green "  Removed: $($_.FullName)"
-            $script:removedSkills++
-        }
-    }
-
-    # Remove every seo-*.md agent file
-    if (Test-Path $AgentDir -PathType Container) {
-        Get-ChildItem -Path $AgentDir -File -Filter "seo-*.md" -ErrorAction SilentlyContinue | ForEach-Object {
-            Remove-Item -Force $_.FullName
-            Write-Color Green "  Removed: $($_.FullName)"
-            $script:removedAgents++
-        }
-    }
-
-    Write-Host ""
-    if ($removedSkills -eq 0 -and $removedAgents -eq 0) {
-        Write-Color Yellow "Nothing to remove. Claude SEO does not appear to be installed."
-        Write-Color Yellow "If you installed via /plugin install, run /plugin uninstall instead."
-        return
-    }
-
-    Write-Color Cyan "=== claude-seo uninstalled ($removedSkills skill dirs, $removedAgents agent files) ==="
-    Write-Host ""
-    Write-Color Yellow "Restart Claude Code to complete removal."
+# Remove agent
+$agentFile = "$env:USERPROFILE\.claude\agents\seo-dataforseo.md"
+if (Test-Path $agentFile) {
+    Remove-Item -Force $agentFile
 }
 
-Main
+# Remove field config
+$fieldConfig = "$env:USERPROFILE\.claude\skills\seo\dataforseo-field-config.json"
+if (Test-Path $fieldConfig) {
+    Remove-Item -Force $fieldConfig
+}
+
+# Remove MCP server entry from settings.json
+$settingsFile = "$env:USERPROFILE\.claude\settings.json"
+if (Test-Path $settingsFile) {
+    $python = Get-Command -Name python -ErrorAction SilentlyContinue
+    if ($null -eq $python) {
+        $python = Get-Command -Name py -ErrorAction SilentlyContinue
+    }
+
+    if ($null -ne $python) {
+        $pyExe = $python.Source
+        $pyScript = @"
+import json
+settings_path = r'$settingsFile'
+with open(settings_path, 'r') as f:
+    settings = json.load(f)
+if 'mcpServers' in settings and 'dataforseo' in settings['mcpServers']:
+    del settings['mcpServers']['dataforseo']
+    if not settings['mcpServers']:
+        del settings['mcpServers']
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=2)
+    print('  ok')
+"@
+        $result = & $pyExe -c $pyScript 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  ✓ Removed dataforseo from settings.json" -ForegroundColor Green
+        } else {
+            Write-Host "  ⚠  Could not auto-remove MCP config. Remove 'dataforseo' from ~\.claude\settings.json manually." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  ⚠  Python not found. Remove 'dataforseo' from ~\.claude\settings.json manually." -ForegroundColor Yellow
+    }
+}
+
+Write-Host "✓ DataForSEO extension uninstalled." -ForegroundColor Green
